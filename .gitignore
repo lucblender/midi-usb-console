@@ -39,3 +39,7 @@
 
 # debug information files
 *.dwo
+
+midi-usb-console/build/
+
+midi-usb-console/.vscode/
