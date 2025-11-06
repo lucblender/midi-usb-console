@@ -17,11 +17,13 @@ BLEMIDI_CREATE_INSTANCE("ble-midi-console", MidiBluetooth)
 #endif
 
 // number of digital and analog channels
-#define DIGITAL_CHANNELS_NUMBER 11
+#define DIGITAL_CHANNELS_NUMBER 10
 #define ANALOG_CHANNELS_NUMBER 8
 
 // pin number for the midi activity led
 #define LED_MIDI_PIN 13
+
+#define SHIFT_SWITCH_PIN 12
 
 // minimum time the led stays on after a control change
 #define MIN_LED_TIME_MS 20
@@ -33,15 +35,20 @@ struct pin_cc
 {
   uint8_t pin;
   uint8_t cc;
+  uint8_t cc_shift;
 };
 
 // index for pin and cc in the pin_cc structure, both analog (potentiomenters, 0..127) and digital (switches, 0..1)
-struct pin_cc analog_channels[ANALOG_CHANNELS_NUMBER] = {{A0, 10}, {A1, 11}, {A2, 12}, {A3, 13}, {A4, 14}, {A5, 15}, {A6, 16}, {A7, 17}};
-struct pin_cc digital_channels[DIGITAL_CHANNELS_NUMBER] = {{9, 100}, {8, 101}, {7, 102}, {6, 103}, {5, 104}, {4, 105}, {3, 106}, {2, 107}, {12, 108}, {11, 109}, {10, 110}};
+struct pin_cc analog_channels[ANALOG_CHANNELS_NUMBER] = {
+    {A0, 16, 120}, {A1, 17, 121}, {A2, 18, 122}, {A3, 19, 123}, {A4, 20, 124}, {A5, 21, 125}, {A6, 22, 126}, {A7, 23, 127}};
+struct pin_cc digital_channels[DIGITAL_CHANNELS_NUMBER] = {
+
+    {9, 58}, {8, 59}, {7, 55}, {6, 71}, {5, 60}, {4, 42}, {3, 43}, {2, 44}, {11, 41}, {10, 45}};
 
 // current values of the channels
-uint8_t digital_value[DIGITAL_CHANNELS_NUMBER] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+uint8_t digital_value[DIGITAL_CHANNELS_NUMBER] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 uint8_t analog_value[ANALOG_CHANNELS_NUMBER] = {0, 0, 0, 0, 0, 0, 0, 0};
+uint8_t analog_value_shifted[ANALOG_CHANNELS_NUMBER] = {0, 0, 0, 0, 0, 0, 0, 0};
 
 // last time a control change was sent
 unsigned long lastControlChange = 0;
@@ -53,6 +60,11 @@ const float SMOOTHING = 0.05;
 
 // status of bluetooth midi connection
 bool bluetoothMidiConnected = false;
+
+PinStatus shiftSwitchState = LOW;
+PinStatus shiftSwitchStateOld = LOW;
+
+bool analog_value_keepup[ANALOG_CHANNELS_NUMBER] = {false, false, false, false, false, false, false, false};
 
 /**
  * @brief Send a midi control change on all available transports
@@ -113,7 +125,7 @@ void sendControlChangeUSB(byte channel, byte control, byte value)
  */
 void sendControlChangeTRS(byte channel, byte control, byte value)
 {
-  byte status = 0xB0 | ((channel - 1) & 0x0F);
+  byte status = 0xB0 | ((channel) & 0x0F);
   Serial1.write(status);
   Serial1.write(control);
   Serial1.write(value);
@@ -146,6 +158,8 @@ void initDigitals()
     controlChange(0, digital_channels[i].cc, tmpValue);
   }
 
+  pinMode(SHIFT_SWITCH_PIN, INPUT_PULLUP);
+
   pinMode(LED_MIDI_PIN, OUTPUT);
 }
 
@@ -163,7 +177,20 @@ void readDigitals()
     if (tmpValue != digital_value[i])
     {
       digital_value[i] = tmpValue;
-      controlChange(0, digital_channels[i].cc, tmpValue);
+      if (tmpValue == 0)
+        controlChange(0, digital_channels[i].cc, 0);
+      else
+        controlChange(0, digital_channels[i].cc, 127);
+    }
+  }
+  shiftSwitchState = digitalRead(SHIFT_SWITCH_PIN);
+
+  if (shiftSwitchState != shiftSwitchStateOld)
+  {
+    shiftSwitchStateOld = shiftSwitchState;
+    for (int i = 0; i < ANALOG_CHANNELS_NUMBER; i++)
+    {
+      analog_value_keepup[i] = true;
     }
   }
 }
@@ -183,7 +210,9 @@ void initAnalog()
     rawValue = analogRead(analog_channels[i].pin) >> 3;
 
     analog_value[i] = rawValue;
+    analog_value_shifted[i] = rawValue;
     controlChange(0, analog_channels[i].cc, rawValue);
+    controlChange(0, analog_channels[i].cc_shift, rawValue);
   }
 }
 
@@ -204,18 +233,49 @@ void readAnalogs()
     rawValue = analogRead(analog_channels[i].pin) >> 3;
 
     // exponential smoothing
-    filtered = (float)analog_value[i] * (1.0 - SMOOTHING) + (float)rawValue * SMOOTHING;
+    if (shiftSwitchState == LOW)
+    {
+      filtered = (float)analog_value[i] * (1.0 - SMOOTHING) + (float)rawValue * SMOOTHING;
+    }
+    else
+    {
+      filtered = (float)analog_value_shifted[i] * (1.0 - SMOOTHING) + (float)rawValue * SMOOTHING;
+    }
 
     if (filtered > 64)
       newValue = ceil(filtered); // to be sure to reach 127, round to upper value
     else
       newValue = floor(filtered); // to be sure to reach 0, round to lower value
 
-    // only send if value changed (integer step)
-    if (newValue != analog_value[i])
+    uint8_t valueToCompoare;
+    if (shiftSwitchState == LOW)
     {
-      analog_value[i] = newValue;
-      controlChange(0, analog_channels[i].cc, newValue);
+      valueToCompoare = analog_value[i];
+    }
+    else
+    {
+      valueToCompoare = analog_value_shifted[i];
+    }
+    if (i == 0)
+      Serial.println(abs(rawValue - valueToCompoare));
+
+    // only send if value changed (integer step)
+    if (newValue != valueToCompoare)
+    {
+      if ((analog_value_keepup[i] == false) || (analog_value_keepup[i] == true && abs(rawValue - valueToCompoare) < 30))
+      {
+        analog_value_keepup[i] = false;
+        if (shiftSwitchState == LOW)
+        {
+          analog_value[i] = newValue;
+          controlChange(0, analog_channels[i].cc, newValue);
+        }
+        else
+        {
+          analog_value_shifted[i] = newValue;
+          controlChange(0, analog_channels[i].cc_shift, newValue);
+        }
+      }
     }
   }
 }
