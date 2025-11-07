@@ -1,0 +1,6 @@
+# Requirements for MIDI USB Console Configurator
+# GUI Framework
+flet>=0.21.0
+
+# Serial Communication
+pyserial>=3.5

@@ -14,6 +14,10 @@
 - BLE-MIDI v2.2 By lathoub
 - MIDI Library v5.0.2 By Francois Best, lathoub
 
+#### Flash storage
+
+-FlashStorage v1.0.0 By Various
+
 ## License
 
 This project is licensed under the [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) License. You may use, modify, and share it for non-commercial purposes.

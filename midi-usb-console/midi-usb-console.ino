@@ -3,6 +3,8 @@
 #define USB_MIDI
 #define TRS_MIDI
 
+#include <FlashStorage.h>
+
 #ifdef USB_MIDI
 #include "MIDIUSB.h"
 #endif
@@ -38,6 +40,15 @@ struct pin_cc
   uint8_t cc_shift;
 };
 
+struct flash_config
+{
+  uint8_t analog_cc[ANALOG_CHANNELS_NUMBER];
+  uint8_t analog_cc_shift[ANALOG_CHANNELS_NUMBER];
+  uint8_t digital_cc[DIGITAL_CHANNELS_NUMBER];
+};
+
+FlashStorage(flashCCStore, struct flash_config);
+
 // index for pin and cc in the pin_cc structure, both analog (potentiomenters, 0..127) and digital (switches, 0..1)
 struct pin_cc analog_channels[ANALOG_CHANNELS_NUMBER] = {
     {A0, 16, 120}, {A1, 17, 121}, {A2, 18, 122}, {A3, 19, 123}, {A4, 20, 124}, {A5, 21, 125}, {A6, 22, 126}, {A7, 23, 127}};
@@ -65,6 +76,15 @@ PinStatus shiftSwitchState = LOW;
 PinStatus shiftSwitchStateOld = LOW;
 
 bool analog_value_keepup[ANALOG_CHANNELS_NUMBER] = {false, false, false, false, false, false, false, false};
+
+String inputString = "";     // a string to hold incoming data
+bool stringComplete = false; // whether the string is complete
+
+const String PREFIX = "lx-csl ";
+const String DISCOVERY = "discovery";
+const String CONFIG = "config";
+const String CONFIG_OK = "OK";
+const String CONFIG_ERR = "ERR";
 
 /**
  * @brief Send a midi control change on all available transports
@@ -256,8 +276,6 @@ void readAnalogs()
     {
       valueToCompoare = analog_value_shifted[i];
     }
-    if (i == 0)
-      Serial.println(abs(rawValue - valueToCompoare));
 
     // only send if value changed (integer step)
     if (newValue != valueToCompoare)
@@ -287,6 +305,7 @@ void readAnalogs()
 void setup()
 {
   Serial.begin(115200);
+  inputString.reserve(200); // reserve some memory for efficiency
 
 #ifdef BLUETOOTH_MIDI
   // bluetooth callbacks for connection status
@@ -306,6 +325,8 @@ void setup()
   // wait for midi connection before init --> init send current value of all controls
   delay(2000);
 
+  initFlashCCStore();
+
 #ifdef TRS_MIDI
   Serial1.begin(31250);
 #endif
@@ -321,6 +342,7 @@ void setup()
 void loop()
 {
 
+  handleSerialMessage();
 #ifdef BLUETOOTH_MIDI
   MidiBluetooth.read();
 #endif
@@ -339,4 +361,229 @@ void loop()
 
     controlChangeLed = 0;
   }
+}
+
+void handleSerialMessage()
+{
+  readSerial();
+
+  if (stringComplete)
+  {
+    if (inputString.startsWith(PREFIX))
+    {
+      // process the line here...
+      inputString.remove(0, PREFIX.length()); // remove the prefix
+      inputString.trim();                     // remove any leading/trailing whitespace
+
+      if (inputString.startsWith(DISCOVERY))
+      {
+        handleDiscovery();
+      }
+      if (inputString.startsWith(CONFIG))
+      {
+        handleConfig(inputString);
+      }
+    }
+
+    // clear the string for the next line
+    inputString = "";
+    stringComplete = false;
+  }
+}
+
+void readSerial()
+{
+
+  while (Serial.available())
+  {
+    char inChar = (char)Serial.read();
+    // Add it to the inputString
+    inputString += inChar;
+
+    // Check for end of line
+    if (inChar == '\n')
+    {
+      stringComplete = true;
+    }
+  }
+}
+
+void handleDiscovery()
+{
+  String answer;
+
+  answer += "a:";
+  answer += String(ANALOG_CHANNELS_NUMBER);
+  answer += ";d:";
+  answer += String(DIGITAL_CHANNELS_NUMBER);
+  answer += ";";
+  for (int i = 0; i < ANALOG_CHANNELS_NUMBER; i++)
+  {
+    answer += "ac:";
+    answer += String(analog_channels[i].cc);
+    answer += ",";
+    answer += String(analog_channels[i].cc_shift);
+    answer += ";";
+  }
+  for (int i = 0; i < DIGITAL_CHANNELS_NUMBER; i++)
+  {
+    answer += "dc:";
+    answer += String(digital_channels[i].cc);
+    answer += ";";
+  }
+
+  Serial.print(PREFIX);
+  Serial.print(DISCOVERY);
+  Serial.print(" ");
+  Serial.println(answer);
+}
+
+void handleConfig(String &inputString)
+{
+  // parse config message
+  // example lx-csl config a:8;d:10;ac:16,120;ac:17,121;ac:18,122;ac:19,123;ac:20,124;ac:21,125;ac:22,126;ac:23,127;dc:58;dc:59;dc:55;dc:71;dc:60;dc:42;dc:43;dc:44;dc:41;dc:45
+  inputString.remove(0, CONFIG.length()); // remove the config keyword
+  inputString.trim();                     // remove any leading/trailing whitespace
+
+  // Parse the message
+  int analogChannels = 0;
+  int digitalChannels = 0;
+  int analogIndex = 0;
+  int digitalIndex = 0;
+
+  // Split by semicolon
+  int startPos = 0;
+  int endPos = 0;
+
+  while (endPos != -1)
+  {
+    endPos = inputString.indexOf(';', startPos);
+    String token;
+    if (endPos == -1)
+    {
+      token = inputString.substring(startPos);
+    }
+    else
+    {
+      token = inputString.substring(startPos, endPos);
+    }
+    token.trim();
+
+    if (token.startsWith("a:"))
+    {
+      analogChannels = token.substring(2).toInt();
+    }
+    else if (token.startsWith("d:"))
+    {
+      digitalChannels = token.substring(2).toInt();
+    }
+    else if (token.startsWith("ac:"))
+    {
+      if (analogIndex < ANALOG_CHANNELS_NUMBER)
+      {
+        String ccValues = token.substring(3);
+        int commaPos = ccValues.indexOf(',');
+        if (commaPos != -1)
+        {
+          int cc = ccValues.substring(0, commaPos).toInt();
+          int ccShift = ccValues.substring(commaPos + 1).toInt();
+
+          // Validate CC values are in valid MIDI range (0-127)
+          if (cc >= 0 && cc <= 127 && ccShift >= 0 && ccShift <= 127)
+          {
+            analog_channels[analogIndex].cc = cc;
+            analog_channels[analogIndex].cc_shift = ccShift;
+          }
+        }
+        analogIndex++;
+      }
+    }
+    else if (token.startsWith("dc:"))
+    {
+      if (digitalIndex < DIGITAL_CHANNELS_NUMBER)
+      {
+        int cc = token.substring(3).toInt();
+
+        // Validate CC value is in valid MIDI range (0-127)
+        if (cc >= 0 && cc <= 127)
+        {
+          digital_channels[digitalIndex].cc = cc;
+        }
+        digitalIndex++;
+      }
+    }
+
+    startPos = endPos + 1;
+  }
+
+  // Only write to flash if the channel counts match
+  if (analogChannels == ANALOG_CHANNELS_NUMBER && digitalChannels == DIGITAL_CHANNELS_NUMBER)
+  {
+    writeFlashCCStore();
+    Serial.print(PREFIX);
+    Serial.print(CONFIG);
+    Serial.print(" ");
+    Serial.println(CONFIG_OK);
+  }
+  else
+  {
+    Serial.print(PREFIX);
+    Serial.print(CONFIG);
+    Serial.print(" ");
+    Serial.println(CONFIG_ERR);
+  }
+}
+
+void initFlashCCStore()
+{
+  bool isFlashEmpty = true;
+  flash_config storedConfig = flashCCStore.read();
+
+  for (int i = 0; i < ANALOG_CHANNELS_NUMBER; i++)
+  {
+    if (storedConfig.analog_cc[i] != 0x00)
+      isFlashEmpty = false;
+    if (storedConfig.analog_cc_shift[i] != 0x00)
+      isFlashEmpty = false;
+  }
+  for (int i = 0; i < DIGITAL_CHANNELS_NUMBER; i++)
+  {
+    if (storedConfig.digital_cc[i] != 0x00)
+      isFlashEmpty = false;
+  }
+
+  if (isFlashEmpty == true)
+  {
+    writeFlashCCStore();
+  }
+  else
+  {
+    for (int i = 0; i < ANALOG_CHANNELS_NUMBER; i++)
+    {
+      analog_channels[i].cc = storedConfig.analog_cc[i];
+      analog_channels[i].cc_shift = storedConfig.analog_cc_shift[i];
+    }
+    for (int i = 0; i < DIGITAL_CHANNELS_NUMBER; i++)
+    {
+      digital_channels[i].cc = storedConfig.digital_cc[i];
+    }
+  }
+}
+
+void writeFlashCCStore()
+{
+  flash_config storeConfig;
+
+  for (int i = 0; i < ANALOG_CHANNELS_NUMBER; i++)
+  {
+    storeConfig.analog_cc[i] = analog_channels[i].cc;
+    storeConfig.analog_cc_shift[i] = analog_channels[i].cc_shift;
+  }
+  for (int i = 0; i < DIGITAL_CHANNELS_NUMBER; i++)
+  {
+    storeConfig.digital_cc[i] = digital_channels[i].cc;
+  }
+
+  flashCCStore.write(storeConfig);
+  initFlashCCStore();
 }
